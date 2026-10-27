@@ -199,6 +199,24 @@ const APPROVED_CLINIC_SERVICES = [
     en: "Dentures: Starting at ₱7,500, depending on the type and materials used. We do not list additional denture types, material options, or exact prices beyond this approved knowledge.",
     tl: "Dentures: Starting at ₱7,500, depending on the type and materials used. Wala kaming karagdagang denture types, material options, o exact prices na wala sa approved knowledge.",
   },
+  {
+    id: "veneers",
+    terms: ["veneer", "veneers"],
+    en: "Veneers are available at Amethyst Dental Clinic. Pricing is available upon consultation or confirmation by the clinic. We do not quote an amount before the dentist examines your teeth. Book a FREE consultation / oral examination. Mag-book sa Appointments.",
+    tl: "Available ang Veneers sa Amethyst Dental Clinic. Available upon consultation o confirmation ng klinika ang presyo. Hindi kami magku-quote ng amount bago i-exam ng dentista ang ngipin. Mag-book ng FREE consultation / oral examination. Mag-book sa Appointments.",
+  },
+  {
+    id: "dental-implants",
+    terms: ["implant", "implants", "dental implant", "dental implants"],
+    en: "Dental Implants are available at Amethyst Dental Clinic. Pricing is available upon consultation or confirmation by the clinic. We do not quote an implant fee before the dentist examines your case. Book a FREE consultation / oral examination. Mag-book sa Appointments.",
+    tl: "Available ang Dental Implants sa Amethyst Dental Clinic. Available upon consultation o confirmation ng klinika ang presyo. Hindi kami magku-quote ng implant fee bago i-exam ng dentista ang kaso. Mag-book ng FREE consultation / oral examination. Mag-book sa Appointments.",
+  },
+  {
+    id: "gum-contouring",
+    terms: ["gum contouring", "gum contour", "gingivoplasty", "gingival contouring"],
+    en: "Gum Contouring is available at Amethyst Dental Clinic. Pricing is available upon consultation or confirmation by the clinic. We do not quote an amount before the dentist examines your gums. Book a FREE consultation / oral examination. Mag-book sa Appointments.",
+    tl: "Available ang Gum Contouring sa Amethyst Dental Clinic. Available upon consultation o confirmation ng klinika ang presyo. Hindi kami magku-quote ng amount bago i-exam ng dentista ang gilagid. Mag-book ng FREE consultation / oral examination. Mag-book sa Appointments.",
+  },
 ];
 
 const APPROVED_SERVICE_FACTS_EN = `Official Amethyst Dental Clinic services and prices (quote exactly; do not invent discounts, extras, or totals):
@@ -216,6 +234,9 @@ const APPROVED_SERVICE_FACTS_EN = `Official Amethyst Dental Clinic services and 
 - Hawley Retainer / Straight-Wire Retainer: ₱3,500 for the upper or lower retainer, not automatically both.
 - Invisible Retainer: ₱5,000 for the upper or lower retainer, not automatically both.
 - Dentures: Starting at ₱7,500, depending on the type and materials used. Do not invent additional denture types or material prices.
+- Veneers: Available; pricing is available upon consultation or confirmation by the clinic. Do not invent a peso amount.
+- Dental Implants: Available; pricing is available upon consultation or confirmation by the clinic. Do not invent a peso amount.
+- Gum Contouring: Available; pricing is available upon consultation or confirmation by the clinic. Do not invent a peso amount.
 Never present a starting price as a guaranteed final price. If the patient asks which material, denture type, or treatment is best for them, do not guess. Explain that it depends on their needs and invite a FREE consultation / oral examination. Do not claim a dentist has evaluated the patient unless an assessment is recorded.`;
 
 const GENERIC_SERVICE_TOKENS = new Set([
@@ -341,8 +362,28 @@ const SERVICE_ALIASES = [
   { id: "emergency-care", terms: ["emergency", "urgent pain", "emergency care"] },
   { id: "oral-surgery", terms: ["oral surgery", "surgical"] },
   {
-    id: "dentures-bridge-crown",
-    terms: ["denture", "dentures", "bridge", "crown", "cap", "pustiso", "korona"],
+    id: "dentures",
+    terms: ["denture", "dentures", "pustiso"],
+  },
+  {
+    id: "fixed-bridge",
+    terms: ["fixed bridge", "dental bridge", "bridge"],
+  },
+  {
+    id: "dental-crowns",
+    terms: ["dental crown", "dental crowns", "crown", "crowns", "cap", "korona"],
+  },
+  {
+    id: "veneers",
+    terms: ["veneer", "veneers"],
+  },
+  {
+    id: "dental-implants",
+    terms: ["implant", "implants", "dental implant", "dental implants"],
+  },
+  {
+    id: "gum-contouring",
+    terms: ["gum contouring", "gum contour", "gingivoplasty"],
   },
 ];
 
@@ -1229,6 +1270,12 @@ function describeService(service, lang) {
     whitening: "whitening",
     "general-consultation": "consultation",
     "orthodontic-consultation": "consultation",
+    dentures: "dentures",
+    "fixed-bridge": "crown-bridge",
+    "dental-crowns": "crown-bridge",
+    veneers: "veneers",
+    "dental-implants": "dental-implants",
+    "gum-contouring": "gum-contouring",
   };
   const mappedId = bookingToApproved[String(service.id || "")];
   const approved = mappedId
@@ -1758,40 +1805,55 @@ function slimPatientContext(patientContext) {
 
 async function generateGeminiText(apiKey, prompt) {
   const { parseGeminiUsage, trackAiUsage } = require("./aiUsage");
-  const { getGeminiModel, generateGeminiContent, extractGeminiText } = require("./geminiModel");
-  const model = getGeminiModel();
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 12000);
   let recorded = false;
   const record = (event) => {
     if (recorded) return;
     recorded = true;
     trackAiUsage({
       feature: "patient_assistant",
-      model,
+      model: "gemini-1.5-flash",
       ...event,
     });
   };
   try {
-    const result = await generateGeminiContent({
-      apiKey,
-      model,
-      parts: [{ text: prompt }],
-      generationConfig: { temperature: 0.3 },
-    });
-    if (!result.ok) {
-      const error = new Error(`gemini-http-${result.status}`);
-      error.code = result.status === 429 ? "rate_limit" : "http";
+    const response = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${encodeURIComponent(apiKey)}`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          contents: [{ parts: [{ text: prompt }] }],
+          generationConfig: { temperature: 0.3, maxOutputTokens: 420 },
+        }),
+        signal: controller.signal,
+      }
+    );
+    if (!response.ok) {
+      record({ outcome: "failed", httpStatus: response.status });
+      const error = new Error(`gemini-http-${response.status}`);
+      error.code = response.status === 429 ? "rate_limit" : "http";
       throw error;
     }
-    const text = extractGeminiText(result.payload);
+    const payload = await response.json();
+    const text = payload?.candidates?.[0]?.content?.parts
+      ?.map((part) => part.text)
+      .join("\n")
+      .trim();
     if (!text) {
+      record({ outcome: "failed", httpStatus: 200, usage: parseGeminiUsage(payload) });
       const error = new Error("gemini-empty");
       error.code = "empty";
       throw error;
     }
-    record({ outcome: "success", httpStatus: 200, usage: parseGeminiUsage(result.payload) });
+    record({ outcome: "success", httpStatus: 200, usage: parseGeminiUsage(payload) });
     return text;
   } catch (error) {
+    record({ outcome: "failed" });
     throw error;
+  } finally {
+    clearTimeout(timer);
   }
 }
 
@@ -1814,7 +1876,6 @@ async function answerWithOptionalGemini(question, servicesOrOptions) {
   }
 
   const { withAiUsageContext } = require("./aiUsage");
-  const { getGeminiModel } = require("./geminiModel");
   try {
     return await withAiUsageContext(
       {
@@ -1861,21 +1922,12 @@ Patient question: ${question}`;
     return {
       answer: alreadyNoted ? text : `${text}\n\n${note}`,
       source: "gemini",
-      model: getGeminiModel(),
+      model: "gemini-1.5-flash",
       language: local.language,
     };
       }
     );
   } catch {
-    const { trackAiUsage } = require("./aiUsage");
-    trackAiUsage({
-      feature: "patient_assistant",
-      outcome: "success",
-      model: "clinic-faq-fallback",
-      userId: options.usageUserId || null,
-      userRole: options.usageUserRole || "patient",
-      db: options.db || null,
-    });
     return { ...local, model: "clinic-faq-fallback" };
   }
 }
