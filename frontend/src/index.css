@@ -1,4 +1,4 @@
-:root {
+﻿:root {
   color: #322c42;
   background: #f7f4fa;
   font-family: Inter, Manrope, "Segoe UI", Arial, sans-serif;
@@ -6648,7 +6648,7 @@ body.is-queue-display .staff-mobile-nav {
 .admin-status--synced { color: var(--emerald); background: var(--emerald-wash); }
 .admin-status--failed { color: var(--danger); background: var(--danger-wash); }
 
-/* —— Public queue display —— */
+/* â€”â€” Public queue display â€”â€” */
 .queue-display {
   min-height: 100vh;
   padding: clamp(1.25rem, 3vw, 2.4rem);
@@ -6762,7 +6762,7 @@ body.is-queue-display .staff-mobile-nav {
   .queue-display__clock { text-align: left; }
 }
 
-/* —— Clinic assistant —— */
+/* â€”â€” Clinic assistant â€”â€” */
 .assistant-panel {
   position: relative;
   display: flex;
@@ -7248,7 +7248,6 @@ body.is-queue-display .staff-mobile-nav {
 .patient-assistant__bubble.is-open {
   background: linear-gradient(180deg, var(--amethyst-700) 0%, #43196a 100%);
 }
-
 .patient-assistant__panel {
   position: fixed;
   z-index: 24;
@@ -7490,7 +7489,7 @@ body.is-queue-display .staff-mobile-nav {
   }
 }
 
-/* —— X-ray uploads —— */
+/* â€”â€” X-ray uploads â€”â€” */
 .xray-upload-section { margin-bottom: 1.25rem; }
 .xray-list { display: grid; gap: 0.75rem; margin-top: 1rem; }
 .xray-row {
@@ -7511,7 +7510,7 @@ body.is-queue-display .staff-mobile-nav {
   line-height: 1.4;
 }
 
-/* —— Dental chart —— */
+/* â€”â€” Dental chart â€”â€” */
 .dentist-modal--wide {
   width: min(100%, 1100px);
   max-height: min(92vh, 980px);
@@ -7690,7 +7689,7 @@ body.is-queue-display .staff-mobile-nav {
   width: 100%;
   height: auto;
 }
-/* Lower teeth are mirrored so crowns meet the midline — flat front view, never rotated. */
+/* Lower teeth are mirrored so crowns meet the midline â€” flat front view, never rotated. */
 .odo-tooth--lower .odo-tooth__svg {
   transform: scaleY(-1);
 }
@@ -8228,7 +8227,7 @@ body.is-queue-display .staff-mobile-nav {
   }
 }
 
-/* Clinic Schedule (View Calendar / Set Slot) — scoped CSS only */
+/* Clinic Schedule (View Calendar / Set Slot) â€” scoped CSS only */
 .admin-page:has(.clinic-calendar),
 .admin-page:has(.clinic-slot-grid),
 .admin-page:has(.clinic-calendar__legend) {
@@ -8726,7 +8725,7 @@ body.is-queue-display .staff-mobile-nav {
   }
 }
 
-/* Admin AI — Chatbot Knowledge Settings card only */
+/* Admin AI â€” Chatbot Knowledge Settings card only */
 .admin-ai-knowledge {
   padding: 1.35rem 1.4rem 1.25rem;
   border: 1px solid rgba(115, 59, 170, 0.16);
@@ -9178,7 +9177,7 @@ body.is-queue-display .staff-mobile-nav {
   }
 }
 
-/* RFID Tag Assignments — scoped mobile layout */
+/* RFID Tag Assignments â€” scoped mobile layout */
 .admin-rfid-cards { display: none; }
 .admin-rfid-page { min-width: 0; }
 .admin-rfid-page .admin-panel,
@@ -11881,7 +11880,7 @@ body.is-queue-display .fab-menu {
   }
 }
 
-/* Landing hero — cinematic CSS-only treatment */
+/* Landing hero â€” cinematic CSS-only treatment */
 .landing .landing-hero {
   --hero-ivory: #f8f1e7;
   --hero-gold: #dcc08f;
@@ -12151,7 +12150,7 @@ body.is-queue-display .fab-menu {
   }
 }
 
-/* Hero clinic reception — seamless photo-to-purple blend */
+/* Hero clinic reception â€” seamless photo-to-purple blend */
 .landing .landing-hero {
   grid-template-columns: minmax(0, 1fr);
 }
@@ -12253,3 +12252,4 @@ body.is-queue-display .fab-menu {
     animation: none !important;
   }
 }
+
