@@ -2,6 +2,7 @@ import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
 import {
   ArrowLeftRight,
   Bell,
+  Bot,
   CalendarDays,
   CircleHelp,
   LayoutDashboard,
@@ -21,7 +22,7 @@ import { RoleBottomDock } from "./RoleBottomDock";
 import { LogoutConfirmDialog } from "./LogoutConfirmDialog";
 import { useLogoutConfirm } from "./useLogoutConfirm";
 import { PatientAssistantWidget } from "./PatientAssistantWidget";
-import { PatientAssistantProvider } from "../patientAssistant";
+import { PatientAssistantProvider, usePatientAssistant } from "../patientAssistant";
 import { useAuth } from "../useAuth";
 import { api } from "../api";
 import { onNotificationsChanged } from "../notificationEvents";
@@ -31,6 +32,7 @@ const navigation = [
   { to: "/dashboard", label: "Dashboard", icon: LayoutDashboard },
   { to: "/appointments", label: "Appointment", icon: CalendarDays },
   { to: "/queue", label: "Queue Status", icon: UsersRound },
+  { to: "/assistant", label: "AI Assistant", icon: Bot },
   { to: "/family", label: "Family", icon: Users },
   { to: "/profile", label: "My Profile", icon: UserRound },
   { to: "/notifications", label: "Notifications", icon: Bell, alertKey: "unread" },
@@ -50,6 +52,7 @@ export function PortalLayout(props) {
 
 function PortalLayoutShell({ theme, onToggleTheme, onThemeChange }) {
   const { user, actingAs, principal, startSession } = useAuth();
+  const { open, openAssistant } = usePatientAssistant();
   const navigate = useNavigate();
   const { requestLogout, logoutDialogProps } = useLogoutConfirm();
   const location = useLocation();
@@ -135,11 +138,19 @@ function PortalLayoutShell({ theme, onToggleTheme, onThemeChange }) {
             <NavLink
               key={to}
               to={to}
-              onClick={() => {
+              onClick={(event) => {
+                if (to === "/assistant") {
+                  event.preventDefault();
+                  openAssistant();
+                  closeMenu();
+                  return;
+                }
                 if (to === "/notifications") setUnreadCount(0);
                 closeMenu();
               }}
-              className={({ isActive }) => `portal-nav__link ${isActive ? "is-active" : ""}`}
+              className={({ isActive }) =>
+                `portal-nav__link ${isActive || (to === "/assistant" && open) ? "is-active" : ""}`
+              }
             >
               <Icon size={19} aria-hidden="true" />
               <span>{label}</span>
@@ -242,6 +253,7 @@ function PortalLayoutShell({ theme, onToggleTheme, onThemeChange }) {
                 { to: "/dashboard", label: "Dashboard", icon: LayoutDashboard },
                 { to: "/appointments", label: "Appointment", icon: CalendarDays },
                 { to: "/queue", label: "Queue Status", icon: UsersRound },
+                { label: "AI Assistant", icon: Bot, onSelect: openAssistant },
                 { to: "/family", label: "Family", icon: Users },
               ],
             },
