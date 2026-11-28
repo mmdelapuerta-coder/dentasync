@@ -1,83 +1,104 @@
-const INACTIVE_STATUSES = new Set(["completed", "cancelled", "canceled", "no_show", "skipped", "needs_review"]);
-const SERVING_STATUSES = new Set(["dentist", "in_chair", "in_treatment"]);
-const WAITING_STATUSES = new Set(["checked_in", "waiting", "preparing", "called"]);
+const ACTIVE_STATUSES = new Set([
+  "checked_in",
+  "waiting",
+  "preparing",
+  "called",
+  "dentist",
+  "in_chair",
+  "in_treatment",
+]);
 
-export function dentistLane(entry) {
-  const dentist = String(entry?.dentist_id || entry?.dentistId || "").trim() || "__unassigned__";
-  const branch = String(entry?.branch_id ?? entry?.branchId ?? "").trim();
-  return branch ? `${branch}::${dentist}` : dentist;
+const INACTIVE_STATUSES = new Set([
+  "completed",
+  "cancelled",
+  "canceled",
+  "no_show",
+  "skipped",
+  "needs_review",
+]);
+
+export function queueStatusKey(status) {
+  const value = String(status || "").toLowerCase();
+  if (value === "in_chair" || value === "in_treatment") return "dentist";
+  if (value === "called") return "preparing";
+  return value;
 }
 
-function statusOf(entry) {
-  return String(entry?.status || "").toLowerCase();
+export function isActiveQueueEntry(entry) {
+  const status = queueStatusKey(entry?.status);
+  if (INACTIVE_STATUSES.has(status)) return false;
+  return ACTIVE_STATUSES.has(status);
 }
 
-function isActiveStatus(status) {
-  return SERVING_STATUSES.has(status) || WAITING_STATUSES.has(status);
+export function dentistLaneId(entry) {
+  return String(entry?.dentistId || entry?.dentist_id || "").trim() || "__unassigned__";
 }
 
-function sameTicket(left, right) {
-  if (!left || !right) return false;
-  if (left.id != null && right.id != null && String(left.id) === String(right.id)) return true;
-  const leftToken = String(left.token || left.queueNumber || "").trim();
-  const rightToken = String(right.token || right.queueNumber || "").trim();
-  return Boolean(leftToken) && leftToken === rightToken;
+function servingRank(status) {
+  const key = queueStatusKey(status);
+  if (key === "dentist" || key === "preparing") return 0;
+  if (key === "waiting" || key === "checked_in") return 1;
+  return 2;
 }
 
-function compareActiveOrder(a, b) {
-  const rank = (entry) => {
-    const status = statusOf(entry);
-    if (SERVING_STATUSES.has(status)) return 0;
-    if (WAITING_STATUSES.has(status)) return 1;
-    return 2;
+export function compareActiveQueueOrder(a, b) {
+  const leftRank = servingRank(a?.status);
+  const rightRank = servingRank(b?.status);
+  if (leftRank !== rightRank) return leftRank - rightRank;
+  const leftPosition = Number(a?.position);
+  const rightPosition = Number(b?.position);
+  if (Number.isFinite(leftPosition) && Number.isFinite(rightPosition) && leftPosition !== rightPosition) {
+    return leftPosition - rightPosition;
+  }
+  const leftId = Number(a?.id);
+  const rightId = Number(b?.id);
+  if (Number.isFinite(leftId) && Number.isFinite(rightId) && leftId !== rightId) {
+    return leftId - rightId;
+  }
+  return String(a?.token || a?.queueNumber || "").localeCompare(String(b?.token || b?.queueNumber || ""));
+}
+
+function isSameTicket(entry, current) {
+  if (!entry || !current) return false;
+  if (entry.isCurrentPatient) return true;
+  if (current.token && entry.token && String(entry.token) === String(current.token)) return true;
+  if (current.queueNumber && entry.queueNumber && String(entry.queueNumber) === String(current.queueNumber)) {
+    return true;
+  }
+  if (current.id != null && entry.id != null && String(entry.id) === String(current.id)) return true;
+  return false;
+}
+
+export function dashboardNextInLine(entries, current) {
+  const you =
+    current ||
+    (Array.isArray(entries) ? entries.find((entry) => entry?.isCurrentPatient) : null) ||
+    null;
+  if (!you) {
+    return { kind: "empty" };
+  }
+  if (queueStatusKey(you.status) === "dentist") {
+    return { kind: "in_progress" };
+  }
+
+  const active = (Array.isArray(entries) ? entries : []).filter(isActiveQueueEntry);
+  const hasLane = active.some((entry) => dentistLaneId(entry) !== "__unassigned__");
+  const lane = dentistLaneId(you);
+  const scoped = hasLane ? active.filter((entry) => dentistLaneId(entry) === lane) : active;
+  const ordered = [...scoped].sort(compareActiveQueueOrder);
+  const next = ordered.find((entry) => queueStatusKey(entry.status) !== "dentist") || null;
+  if (!next || isSameTicket(next, you)) {
+    return { kind: "next" };
+  }
+  return {
+    kind: "next_person",
+    ticket: {
+      token: next.token || next.queueNumber || null,
+      status: next.status,
+    },
   };
-  const rankDiff = rank(a) - rank(b);
-  if (rankDiff !== 0) return rankDiff;
-  return (Number(a.position) || 0) - (Number(b.position) || 0);
-}
-
-function resolveCurrent(entries, current) {
-  if (current && (current.token || current.queueNumber || current.id != null)) return current;
-  return (Array.isArray(entries) ? entries : []).find((entry) => entry?.isCurrentPatient) || null;
-}
-
-function resultFor(kind, extras = {}) {
-  return { kind, state: kind, peopleAhead: 0, ticket: null, ...extras };
 }
 
 export function dashboardPrecedingTicket(entries, current) {
-  const self = resolveCurrent(entries, current);
-  if (!self) {
-    return resultFor("empty");
-  }
-
-  if (SERVING_STATUSES.has(statusOf(self))) {
-    return resultFor("in_progress");
-  }
-
-  const lane = dentistLane(self);
-  const ordered = (Array.isArray(entries) ? entries : [])
-    .filter((entry) => {
-      const status = statusOf(entry);
-      if (INACTIVE_STATUSES.has(status) || !isActiveStatus(status)) return false;
-      return dentistLane(entry) === lane;
-    })
-    .slice()
-    .sort(compareActiveOrder);
-
-  const selfIndex = ordered.findIndex((entry) => sameTicket(entry, self));
-  if (selfIndex <= 0) {
-    return resultFor("next");
-  }
-
-  return resultFor("ahead", {
-    peopleAhead: selfIndex,
-    ticket: ordered[selfIndex - 1],
-  });
-}
-
-export function peopleAheadLabel(count) {
-  const people = Math.max(0, Number(count) || 0);
-  if (people === 1) return "1 person ahead";
-  return `${people} people ahead`;
+  return dashboardNextInLine(entries, current);
 }
