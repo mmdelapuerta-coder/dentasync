@@ -1209,10 +1209,9 @@ function createDentistPortalRouter({
       const updatedResult = await client.query(
         `UPDATE patient_portal_queue_entries
          SET status = 'preparing',
-             called_at = COALESCE(called_at, CURRENT_TIMESTAMP),
              updated_at = CURRENT_TIMESTAMP
          WHERE id = $1
-         RETURNING *`,
+          RETURNING *`,
         [queueId]
       );
       await recordQueueStatusEvent(client, {
@@ -1732,13 +1731,9 @@ function createDentistPortalRouter({
       const updatedResult = await client.query(
         `UPDATE patient_portal_queue_entries
          SET status = $1,
-             called_at = CASE
-               WHEN $1 IN ('preparing', 'called', 'dentist') THEN COALESCE(called_at, CURRENT_TIMESTAMP)
-               ELSE called_at
-             END,
              updated_at = CURRENT_TIMESTAMP
          WHERE id = $2
-         RETURNING *`,
+          RETURNING *`,
         [queueStatus, queueId]
       );
       await recordQueueStatusEvent(client, {
