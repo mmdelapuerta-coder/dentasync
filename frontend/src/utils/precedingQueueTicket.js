@@ -1,4 +1,4 @@
-const INACTIVE_STATUSES = new Set(["completed", "cancelled", "no_show", "skipped", "needs_review"]);
+const INACTIVE_STATUSES = new Set(["completed", "cancelled", "canceled", "no_show", "skipped", "needs_review"]);
 const SERVING_STATUSES = new Set(["dentist", "in_chair", "in_treatment"]);
 const WAITING_STATUSES = new Set(["checked_in", "waiting", "preparing", "called"]);
 
@@ -41,14 +41,18 @@ function resolveCurrent(entries, current) {
   return (Array.isArray(entries) ? entries : []).find((entry) => entry?.isCurrentPatient) || null;
 }
 
+function resultFor(kind, extras = {}) {
+  return { kind, state: kind, peopleAhead: 0, ticket: null, ...extras };
+}
+
 export function dashboardPrecedingTicket(entries, current) {
   const self = resolveCurrent(entries, current);
   if (!self) {
-    return { state: "empty", ticket: null };
+    return resultFor("empty");
   }
 
   if (SERVING_STATUSES.has(statusOf(self))) {
-    return { state: "in_progress", ticket: null };
+    return resultFor("in_progress");
   }
 
   const lane = dentistLane(self);
@@ -63,8 +67,17 @@ export function dashboardPrecedingTicket(entries, current) {
 
   const selfIndex = ordered.findIndex((entry) => sameTicket(entry, self));
   if (selfIndex <= 0) {
-    return { state: "next", ticket: null };
+    return resultFor("next");
   }
 
-  return { state: "ahead", ticket: ordered[selfIndex - 1] };
+  return resultFor("ahead", {
+    peopleAhead: selfIndex,
+    ticket: ordered[selfIndex - 1],
+  });
+}
+
+export function peopleAheadLabel(count) {
+  const people = Math.max(0, Number(count) || 0);
+  if (people === 1) return "1 person ahead";
+  return `${people} people ahead`;
 }

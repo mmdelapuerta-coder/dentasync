@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { dashboardPrecedingTicket } from "./precedingQueueTicket.js";
+import { dashboardPrecedingTicket, peopleAheadLabel } from "./precedingQueueTicket.js";
 
 function ticket(token, extras = {}) {
   return {
@@ -21,7 +21,9 @@ test("first in the dentist lane is next in line", () => {
     current
   );
   assert.equal(result.state, "next");
+  assert.equal(result.kind, "next");
   assert.equal(result.ticket, null);
+  assert.equal(result.peopleAhead, 0);
 });
 
 test("middle ticket sees only the immediately preceding active ticket", () => {
@@ -32,6 +34,8 @@ test("middle ticket sees only the immediately preceding active ticket", () => {
   );
   assert.equal(result.state, "ahead");
   assert.equal(result.ticket.token, "A-001");
+  assert.equal(result.ticket.status, "dentist");
+  assert.equal(result.peopleAhead, 1);
 });
 
 test("last ticket sees the ticket immediately ahead, not the first", () => {
@@ -42,6 +46,24 @@ test("last ticket sees the ticket immediately ahead, not the first", () => {
   );
   assert.equal(result.state, "ahead");
   assert.equal(result.ticket.token, "A-002");
+  assert.equal(result.peopleAhead, 2);
+});
+
+test("other dentist tickets are not counted as people ahead", () => {
+  const result = dashboardPrecedingTicket(
+    [
+      ticket("A-001", { position: 1, status: "dentist" }),
+      ticket("A-002", { position: 2 }),
+      ticket("A-201", { position: 3, dentistId: "d2" }),
+      ticket("A-003", { position: 4, isCurrentPatient: true }),
+    ],
+    ticket("A-003", { position: 4, isCurrentPatient: true })
+  );
+  assert.equal(result.kind, "ahead");
+  assert.equal(result.ticket.token, "A-002");
+  assert.equal(result.peopleAhead, 2);
+  assert.doesNotMatch(JSON.stringify(result), /A-201/);
+  assert.doesNotMatch(JSON.stringify(result), /A-001/);
 });
 
 test("signed-in patient in treatment sees in-progress, not a preceding ticket", () => {
@@ -52,7 +74,9 @@ test("signed-in patient in treatment sees in-progress, not a preceding ticket", 
       current
     );
     assert.equal(result.state, "in_progress", status);
+    assert.equal(result.kind, "in_progress", status);
     assert.equal(result.ticket, null, status);
+    assert.equal(result.peopleAhead, 0, status);
   }
 });
 
@@ -87,4 +111,24 @@ test("ticket numbers are not subtracted; serving then waiting then position", ()
   );
   assert.equal(result.state, "ahead");
   assert.equal(result.ticket.token, "A-010");
+  assert.equal(result.peopleAhead, 1);
+});
+
+test("completed and cancelled tickets are not treated as ahead", () => {
+  const result = dashboardPrecedingTicket(
+    [
+      ticket("A-001", { position: 1, status: "completed" }),
+      ticket("A-002", { position: 2, status: "cancelled" }),
+      ticket("A-003", { position: 3, isCurrentPatient: true }),
+    ],
+    ticket("A-003", { position: 3, isCurrentPatient: true })
+  );
+  assert.equal(result.kind, "next");
+  assert.equal(result.peopleAhead, 0);
+});
+
+test("people-ahead label is readable without listing other tickets", () => {
+  assert.equal(peopleAheadLabel(0), "0 people ahead");
+  assert.equal(peopleAheadLabel(1), "1 person ahead");
+  assert.equal(peopleAheadLabel(2), "2 people ahead");
 });
