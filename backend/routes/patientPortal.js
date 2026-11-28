@@ -1053,6 +1053,7 @@ function createPatientPortalRouter({
             }
           : null,
         queueBoard: {
+          current: queueBoard.current || null,
           entries: queueBoard.entries || [],
           lastUpdatedAt: queueBoard.lastUpdatedAt || null,
         },

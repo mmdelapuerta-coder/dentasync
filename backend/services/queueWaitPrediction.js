@@ -1008,6 +1008,8 @@ function presentPublicQueueEntry(row, { currentUserId, waitEnabled = true } = {}
     queueNumber: row.token,
     position: row.position,
     status: row.status,
+    dentistId: row.dentist_id || row.dentistId || null,
+    branchId: row.branch_id ?? row.branchId ?? null,
     isCurrentPatient: String(row.user_id) === String(currentUserId),
     estimatedWaitMinutes:
       waitEnabled && !estimate?.unavailable ? row.estimated_wait_minutes ?? null : null,
@@ -1024,8 +1026,11 @@ async function loadPatientQueueBoard(db, { userId, waitEnabled = true } = {}) {
       `SELECT queue.id, queue.user_id, queue.token, queue.position, queue.status, queue.branch_id,
               queue.estimated_wait_minutes, queue.wait_estimate_min_minutes, queue.wait_estimate_max_minutes,
               queue.wait_estimate_duration_minutes, queue.wait_estimate_call_start, queue.wait_estimate_call_end,
-              queue.wait_estimate_method, queue.wait_estimate_at, queue.checked_in_at, queue.appointment_id
+              queue.wait_estimate_method, queue.wait_estimate_at, queue.checked_in_at, queue.appointment_id,
+              appointment.dentist_id
        FROM patient_portal_queue_entries AS queue
+       LEFT JOIN patient_portal_appointments AS appointment
+         ON appointment.id = queue.appointment_id
        WHERE queue.user_id = $1
          AND (queue.checked_in_at AT TIME ZONE $2)::date = (CURRENT_TIMESTAMP AT TIME ZONE $2)::date
          AND LOWER(queue.status) IN ('checked_in', 'waiting', 'preparing', 'called', 'dentist')
@@ -1036,12 +1041,15 @@ async function loadPatientQueueBoard(db, { userId, waitEnabled = true } = {}) {
   } catch (error) {
     if (error?.code !== "42703") throw error;
     own = await db.query(
-      `SELECT id, user_id, token, position, status, estimated_wait_minutes, checked_in_at, appointment_id
-       FROM patient_portal_queue_entries
-       WHERE user_id = $1
-         AND DATE(checked_in_at) = CURRENT_DATE
-         AND LOWER(status) IN ('checked_in', 'waiting', 'preparing', 'called', 'dentist')
-       ORDER BY checked_in_at DESC
+      `SELECT queue.id, queue.user_id, queue.token, queue.position, queue.status, queue.estimated_wait_minutes,
+              queue.checked_in_at, queue.appointment_id, appointment.dentist_id
+       FROM patient_portal_queue_entries AS queue
+       LEFT JOIN patient_portal_appointments AS appointment
+         ON appointment.id = queue.appointment_id
+       WHERE queue.user_id = $1
+         AND DATE(queue.checked_in_at) = CURRENT_DATE
+         AND LOWER(queue.status) IN ('checked_in', 'waiting', 'preparing', 'called', 'dentist')
+       ORDER BY queue.checked_in_at DESC
        LIMIT 1`,
       [String(userId)]
     );
@@ -1064,8 +1072,11 @@ async function loadPatientQueueBoard(db, { userId, waitEnabled = true } = {}) {
       `SELECT queue.id, queue.user_id, queue.token, queue.position, queue.status, queue.branch_id,
               queue.estimated_wait_minutes, queue.wait_estimate_min_minutes, queue.wait_estimate_max_minutes,
               queue.wait_estimate_duration_minutes, queue.wait_estimate_call_start, queue.wait_estimate_call_end,
-              queue.wait_estimate_method, queue.wait_estimate_at, queue.checked_in_at, queue.appointment_id
+              queue.wait_estimate_method, queue.wait_estimate_at, queue.checked_in_at, queue.appointment_id,
+              appointment.dentist_id
        FROM patient_portal_queue_entries AS queue
+       LEFT JOIN patient_portal_appointments AS appointment
+         ON appointment.id = queue.appointment_id
        WHERE (queue.checked_in_at AT TIME ZONE $1)::date = (CURRENT_TIMESTAMP AT TIME ZONE $1)::date
          ${branchSql}
          AND (
