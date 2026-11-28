@@ -53,33 +53,60 @@ test("remaining serving time subtracts elapsed recorded treatment progress only"
 
 test("in-chair patients without a start stamp keep the stored procedure length", async () => {
   const db = {
-    async query() {
+    async query(sql) {
+      if (String(sql).includes("SAVEPOINT") || String(sql).startsWith("RELEASE") || String(sql).startsWith("ROLLBACK")) {
+        return { rows: [] };
+      }
+      if (sql.includes("clinic_patient_treatments")) return { rows: [] };
       throw new Error("Should not look up catalog duration for in-chair patients with a known length");
+    },
+  };
+  const wait = await estimateWaitMinutesForPosition(db, {
+    position: 2,
+    aheadEntries: [{ status: "dentist", duration_minutes: 40, service_name: "Cleaning" }],
+  });
+  assert.equal(wait, 40);
+});
+
+test("chair length uses duration_minutes not estimated_wait_minutes", async () => {
+  const db = {
+    async query(sql) {
+      if (String(sql).includes("SAVEPOINT") || String(sql).startsWith("RELEASE") || String(sql).startsWith("ROLLBACK")) {
+        return { rows: [] };
+      }
+      if (sql.includes("clinic_patient_treatments")) return { rows: [] };
+      return { rows: [] };
     },
   };
   const wait = await estimateWaitMinutesForPosition(db, {
     position: 2,
     aheadEntries: [{ status: "dentist", estimated_wait_minutes: 40, service_name: "Cleaning" }],
   });
-  assert.equal(wait, 40);
+  assert.equal(wait, null);
 });
 
-test("A104 wait uses remaining A101 plus full A102 and A103", async () => {
+test("A104 wait is remaining chair time plus 10 minutes per waiter ahead", async () => {
   invalidateDurationStatsCache();
   const now = new Date("2026-09-22T15:00:00.000Z");
   const db = {
     async query(sql, params) {
-      if (sql.includes("clinic_treatment_durations")) {
-        return {
-          rows: [
-            ...Array.from({ length: 5 }, () => ({ procedure_type: "Oral Prophylaxis", duration_minutes: 30 })),
-            ...Array.from({ length: 5 }, () => ({ procedure_type: "Restoration", duration_minutes: 45 })),
-            ...Array.from({ length: 5 }, () => ({ procedure_type: "Extraction", duration_minutes: 40 })),
-          ],
-        };
+      if (sql.includes("clinic_patient_treatments")) {
+        if (Number(params?.[0]) === 101) {
+          return {
+            rows: [
+              {
+                id: 1,
+                treatment: "Oral Prophylaxis",
+                status: "in_progress",
+                duration_minutes: 30,
+                started_at: "2026-09-22T14:45:00.000Z",
+                queue_entry_id: 101,
+              },
+            ],
+          };
+        }
+        return { rows: [] };
       }
-      if (sql.includes("clinic_patient_treatments")) return { rows: [] };
-      if (sql.includes("clinic_service_durations")) return { rows: [] };
       return { rows: [], params };
     },
   };
@@ -89,27 +116,29 @@ test("A104 wait uses remaining A101 plus full A102 and A103", async () => {
     entry: { token: "A104", position: 4, status: "waiting", service_name: "Restoration" },
     aheadEntries: [
       {
+        id: 101,
         token: "A101",
         status: "dentist",
         service_name: "Oral Prophylaxis",
         serving_started_at: "2026-09-22T14:45:00.000Z",
+        duration_minutes: 30,
       },
       { token: "A102", status: "waiting", service_name: "Restoration" },
       { token: "A103", status: "waiting", service_name: "Extraction" },
     ],
   });
 
-  // Remaining 15 of 30-minute prophylaxis + 45 + 40 = 100.
-  assert.equal(estimate.estimatedWaitMinutes.min, 100);
-  assert.equal(estimate.estimatedWaitMinutes.max, 100);
-  assert.equal(estimate.estimationMethod, "historical_average_v1");
+  // Remaining 15 of 30-minute chair time + 10 + 10 = 35.
+  assert.equal(estimate.estimatedWaitMinutes.min, 35);
+  assert.equal(estimate.estimatedWaitMinutes.max, 35);
+  assert.equal(estimate.estimationMethod, "queue_slot_v1");
   assert.equal(estimate.patientsAhead, 3);
   const published = publicWaitEstimate(estimate);
   assert.equal(published.estimationMethod, undefined);
   assert.match(published.estimatedCallTime.start, /T/);
 });
 
-test("unknown procedure is unavailable instead of inventing a wait", async () => {
+test("unknown dentist without duration is unavailable", async () => {
   invalidateDurationStatsCache();
   const db = {
     async query(sql) {
@@ -123,7 +152,7 @@ test("unknown procedure is unavailable instead of inventing a wait", async () =>
   const estimate = await estimateWaitForQueueContext(db, {
     now: new Date("2026-09-22T15:00:00.000Z"),
     entry: { token: "A105", position: 2, status: "waiting" },
-    aheadEntries: [{ token: "A101", status: "waiting" }],
+    aheadEntries: [{ token: "A101", status: "dentist", dentist_id: "unknown" }],
   });
   assert.equal(estimate.unavailable, true);
   assert.equal(estimate.estimatedWaitMinutes, null);
@@ -184,6 +213,52 @@ function proceduresDb(byQueue) {
     },
   };
 }
+
+test("waiters see remaining chair time then 10-minute slots: 30/40/50 then 20/30/40", async () => {
+  invalidateDurationStatsCache();
+  const now = new Date("2026-11-22T10:00:00.000Z");
+  const serving = {
+    id: 1,
+    token: "A-101",
+    status: "dentist",
+    dentist_id: "d1",
+    serving_started_at: now.toISOString(),
+  };
+  const waiters = [
+    { id: 2, token: "A-102", status: "waiting", dentist_id: "d1" },
+    { id: 3, token: "A-103", status: "waiting", dentist_id: "d1" },
+    { id: 4, token: "A-104", status: "waiting", dentist_id: "d1" },
+  ];
+
+  async function waitsFor(durationMinutes) {
+    const db = proceduresDb({
+      1: [
+        {
+          id: 11,
+          treatment: "Cleaning",
+          status: "in_progress",
+          duration_minutes: durationMinutes,
+          started_at: now.toISOString(),
+          visit_sequence: 1,
+          queue_entry_id: 1,
+        },
+      ],
+    });
+    const values = [];
+    for (let index = 0; index < waiters.length; index += 1) {
+      const estimate = await estimateWaitForQueueContext(db, {
+        now,
+        entry: waiters[index],
+        aheadEntries: [serving, ...waiters.slice(0, index)],
+      });
+      values.push(estimate.estimatedWaitMinutes.min);
+    }
+    return values;
+  }
+
+  assert.deepEqual(await waitsFor(30), [30, 40, 50]);
+  assert.deepEqual(await waitsFor(20), [20, 30, 40]);
+});
 
 test("next patient waits remaining chair time, then added procedures, then patients ahead", async () => {
   invalidateDurationStatsCache();

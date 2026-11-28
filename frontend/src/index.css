@@ -10727,6 +10727,27 @@ body.is-queue-display .staff-mobile-nav {
   padding-left: 1.1rem;
 }
 
+.queue-duration-estimate {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 0.4rem 0.65rem;
+  margin: 0.15rem 0 0.25rem;
+}
+.queue-duration-estimate .field {
+  margin: 0;
+  min-width: 8.5rem;
+  flex: 1 1 8rem;
+}
+.queue-duration-estimate .field span {
+  font-size: 0.75rem;
+  line-height: 1.2;
+}
+.queue-duration-estimate input {
+  max-width: 7.5rem;
+  padding: 0.28rem 0.45rem;
+}
+
 .fdi-pick-chips {
   display: flex;
   flex-wrap: wrap;

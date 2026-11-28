@@ -124,8 +124,8 @@ export function callRangeFromEntry(entry) {
 }
 
 export function durationFromEntry(entry) {
-  const minutes = entry?.estimatedDurationMinutes ?? entry?.waitEstimate?.estimatedDurationMinutes;
-  if (minutes == null) return "—";
+  const minutes = entry?.estimatedDurationMinutes ?? entry?.waitEstimate?.estimatedDurationMinutes ?? entry?.durationMinutes;
+  if (minutes == null || !(Number(minutes) > 0)) return "Estimate unavailable";
   return formatSpan(minutes);
 }
 

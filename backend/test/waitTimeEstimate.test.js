@@ -4,19 +4,25 @@ const assert = require("node:assert/strict");
 const test = require("node:test");
 const { estimateWaitMinutesForPosition } = require("../services/waitTime");
 
-test("estimateWaitMinutesForPosition uses in-service procedure duration for current patient", async () => {
-  const db = {
-    async query() {
-      throw new Error("Should not look up catalog duration for in-chair patients with a known length");
+function stubDb() {
+  return {
+    async query(sql) {
+      if (String(sql).includes("SAVEPOINT") || String(sql).startsWith("RELEASE") || String(sql).startsWith("ROLLBACK")) {
+        return { rows: [] };
+      }
+      if (sql.includes("clinic_patient_treatments")) return { rows: [] };
+      return { rows: [] };
     },
   };
+}
 
-  const wait = await estimateWaitMinutesForPosition(db, {
+test("estimateWaitMinutesForPosition uses in-service procedure duration for current patient", async () => {
+  const wait = await estimateWaitMinutesForPosition(stubDb(), {
     position: 2,
     aheadEntries: [
       {
         status: "dentist",
-        estimated_wait_minutes: 40,
+        duration_minutes: 40,
         service_name: "Cleaning",
       },
     ],
@@ -25,23 +31,14 @@ test("estimateWaitMinutesForPosition uses in-service procedure duration for curr
   assert.equal(wait, 40);
 });
 
-test("estimateWaitMinutesForPosition falls back to service catalog for waiting patients ahead", async () => {
-  const db = {
-    async query(sql) {
-      if (sql.includes("clinic_service_durations") && sql.includes("service_name")) {
-        return { rows: [{ default_duration_minutes: 25 }] };
-      }
-      return { rows: [] };
-    },
-  };
-
-  const wait = await estimateWaitMinutesForPosition(db, {
+test("estimateWaitMinutesForPosition is remaining chair time plus 10-minute waiter slots", async () => {
+  const wait = await estimateWaitMinutesForPosition(stubDb(), {
     position: 3,
     aheadEntries: [
+      { status: "dentist", duration_minutes: 30 },
       { status: "waiting", service_name: "Filling" },
-      { status: "dentist", estimated_wait_minutes: 30 },
     ],
   });
 
-  assert.equal(wait, 55);
+  assert.equal(wait, 40);
 });

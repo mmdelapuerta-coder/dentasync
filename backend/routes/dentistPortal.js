@@ -20,6 +20,7 @@ const { insertPatientNotification } = require("../services/patientPortalNotifica
 const {
   getServiceDurationMinutes,
 } = require("../services/waitTime");
+const { withSavepoint } = require("../services/postgresTxn");
 const {
   safeRecalculateQueueWaitEstimates,
   staffWaitEstimate,
@@ -379,9 +380,26 @@ function ageFromDob(value) {
   return age >= 0 ? age : null;
 }
 
+function recordedQueueDurationMinutes(row) {
+  const fromProcedures = (row.procedures || []).reduce((sum, procedure) => {
+    const status = String(procedure.status || "").toLowerCase();
+    if (["completed", "cancelled", "canceled", "removed", "deleted", "void"].includes(status)) {
+      return sum;
+    }
+    const minutes = Number(procedure.durationMinutes ?? procedure.duration_minutes);
+    return Number.isFinite(minutes) && minutes > 0 ? sum + minutes : sum;
+  }, 0);
+  if (fromProcedures > 0) return fromProcedures;
+  if (row.wait_estimate_duration_minutes != null && Number(row.wait_estimate_duration_minutes) > 0) {
+    return Number(row.wait_estimate_duration_minutes);
+  }
+  return null;
+}
+
 function mapQueueEntry(row) {
   const status = displayQueueStatus(row.status);
   const waitMinutes = Number(row.estimated_wait_minutes || 0);
+  const durationMinutes = recordedQueueDurationMinutes(row);
   return {
     id: row.id,
     token: row.token,
@@ -399,18 +417,8 @@ function mapQueueEntry(row) {
     appointmentTime: row.appointment_time || null,
     status,
     waitMinutes,
-    durationMinutes:
-      status === "in_chair"
-        ? row.wait_estimate_duration_minutes != null
-          ? Number(row.wait_estimate_duration_minutes)
-          : waitMinutes
-        : null,
-    estimatedDurationMinutes:
-      row.wait_estimate_duration_minutes != null
-        ? Number(row.wait_estimate_duration_minutes)
-        : status === "in_chair"
-          ? waitMinutes
-          : null,
+    durationMinutes,
+    estimatedDurationMinutes: durationMinutes,
     waitEstimate: staffWaitEstimate(waitEstimateFromRow(row)),
     checkedInAt: row.checked_in_at || null,
     servingStartedAt: row.serving_started_at || null,
@@ -1920,82 +1928,48 @@ function createDentistPortalRouter({
       const appointment = appointmentResult.rows[0] || null;
 
       if (appointment?.service_id || appointment?.service_name) {
-        await client.query(
-          `INSERT INTO clinic_service_durations (service_id, service_name, default_duration_minutes, updated_at)
-           VALUES ($1, $2, $3, CURRENT_TIMESTAMP)
-           ON CONFLICT (service_id) DO UPDATE SET
-             service_name = EXCLUDED.service_name,
-             default_duration_minutes = EXCLUDED.default_duration_minutes,
-             updated_at = CURRENT_TIMESTAMP`,
-          [
-            appointment.service_id || `custom-${appointment.id}`,
-            appointment.service_name || "Dental visit",
-            durationMinutes,
-          ]
-        ).catch((error) => {
+        await withSavepoint(client, "service_duration_catalog", async () => {
+          await client.query(
+            `INSERT INTO clinic_service_durations (service_id, service_name, default_duration_minutes, updated_at)
+             VALUES ($1, $2, $3, CURRENT_TIMESTAMP)
+             ON CONFLICT (service_id) DO UPDATE SET
+               service_name = EXCLUDED.service_name,
+               default_duration_minutes = EXCLUDED.default_duration_minutes,
+               updated_at = CURRENT_TIMESTAMP`,
+            [
+              appointment.service_id || `custom-${appointment.id}`,
+              appointment.service_name || "Dental visit",
+              durationMinutes,
+            ]
+          );
+        }).catch((error) => {
           if (error?.code !== "42P01") throw error;
         });
       }
 
-      await client.query(
-        `UPDATE patient_portal_queue_entries
-         SET estimated_wait_minutes = $1,
-             updated_at = CURRENT_TIMESTAMP
-         WHERE id = $2`,
-        [durationMinutes, queueId]
-      );
+      await withSavepoint(client, "queue_wait_estimate_duration", async () => {
+        await client.query(
+          `UPDATE patient_portal_queue_entries
+           SET wait_estimate_duration_minutes = $1,
+               updated_at = CURRENT_TIMESTAMP
+           WHERE id = $2`,
+          [durationMinutes, queueId]
+        );
+      }).catch((error) => {
+        if (error?.code !== "42703") throw error;
+      });
 
-      if (appointment?.user_id) {
-        const clinical = await client.query(
-          `SELECT id
-           FROM clinic_patient_records
-           WHERE linked_user_id = $1
-             AND COALESCE(is_archived, FALSE) = FALSE
-           ORDER BY updated_at DESC
-           LIMIT 1`,
-          [String(appointment.user_id)]
-        ).catch((error) => {
-          if (error?.code === "42P01") return { rows: [] };
-          throw error;
-        });
-
-        if (clinical.rows[0]) {
-          const todayTreatment = await client.query(
-            `UPDATE clinic_patient_treatments
-             SET duration_minutes = $1
-             WHERE id = (
-               SELECT id
-               FROM clinic_patient_treatments
-               WHERE clinical_record_id = $2
-                 AND treatment_date = CURRENT_DATE
-               ORDER BY id DESC
-               LIMIT 1
-             )
-             RETURNING id`,
-            [durationMinutes, clinical.rows[0].id]
-          ).catch((error) => {
-            if (error?.code === "42703" || error?.code === "42P01") return { rows: [] };
-            throw error;
-          });
-
-          if (!todayTreatment.rows.length) {
-            await clinicalPatients
-              .addClinicalTreatment(
-                client,
-                clinical.rows[0].id,
-                {
-                  treatment: appointment.service_name || "Dental visit",
-                  dentistName: `Dr. ${`${req.dentist.first_name || ""} ${req.dentist.last_name || ""}`.trim()}`.trim(),
-                  treatmentDate: new Date().toISOString().slice(0, 10),
-                  status: "in_progress",
-                  durationMinutes,
-                },
-                { id: req.dentist.id, role: "dentist" }
-              )
-              .catch(() => {});
-          }
-        }
-      }
+      await withSavepoint(client, "in_progress_treatment_duration", async () => {
+        await client.query(
+          `UPDATE clinic_patient_treatments
+           SET duration_minutes = $1
+           WHERE queue_entry_id = $2
+             AND LOWER(COALESCE(status, '')) = 'in_progress'`,
+          [durationMinutes, queueId]
+        );
+      }).catch((error) => {
+        if (error?.code !== "42703" && error?.code !== "42P01") throw error;
+      });
 
       await recomputeWaitsBehind(client, current.position);
       await client.query("COMMIT");

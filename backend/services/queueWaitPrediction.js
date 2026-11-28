@@ -2,8 +2,9 @@
 
 /**
  * Queue wait prediction service.
- * Current algorithm: historical_average_v1 (not machine learning).
- * Swap HistoricalAveragePredictor for an MLPredictor later without changing callers.
+ * Current algorithm: queue_slot_v1 — remaining recorded chair time plus a fixed
+ * allowance per waiting patient ahead in the same dentist/branch lane.
+ * Historical averages are not used as a substitute for a missing chair duration.
  */
 
 const ACTIVE_STATUSES = new Set(["checked_in", "waiting", "preparing", "called", "dentist"]);
@@ -28,10 +29,13 @@ function getPredictionSettings() {
     minValidMinutes: Number.isFinite(minValidMinutes) && minValidMinutes > 0 ? minValidMinutes : 3,
     maxValidMinutes: Number.isFinite(maxValidMinutes) && maxValidMinutes > 0 ? maxValidMinutes : 240,
     statsTtlMs: Number.isFinite(statsTtlMs) && statsTtlMs >= 0 ? statsTtlMs : 60_000,
-    methodVersion: "historical_average_v1",
+    methodVersion: "queue_slot_v1",
+    waitingAllowanceMinutes: Math.max(1, Number(process.env.QUEUE_WAIT_SLOT_MINUTES) || 10),
     timeZone: process.env.CLINIC_TIMEZONE || "Asia/Manila",
   };
 }
+
+const QUEUE_WAIT_SLOT_MINUTES = getPredictionSettings().waitingAllowanceMinutes;
 
 function normalizeProcedure(value) {
   return String(value || "")
@@ -292,16 +296,29 @@ function servingStartTimestamp(entry) {
   );
 }
 
+function recordedEntryDurationMinutes(entry) {
+  const candidates = [
+    entry?.procedureDurationMinutes,
+    entry?.procedure_duration_minutes,
+    entry?.wait_estimate_duration_minutes,
+    entry?.durationMinutes,
+    entry?.duration_minutes,
+  ];
+  for (const value of candidates) {
+    const minutes = Number(value);
+    if (Number.isFinite(minutes) && minutes > 0) return roundMinutes(minutes);
+  }
+  return null;
+}
+
 function remainingServingMinutes(entry, fullMinutes, now = new Date()) {
   const status = String(entry.status || "").toLowerCase();
-  const stored = Number(
-    entry.procedureDurationMinutes ??
-      entry.procedure_duration_minutes ??
-      entry.durationMinutes ??
-      entry.duration_minutes ??
-      fullMinutes
+  const recorded = recordedEntryDurationMinutes(entry);
+  const provided = Number(fullMinutes);
+  const full = Math.max(
+    0,
+    roundMinutes(recorded || (Number.isFinite(provided) && provided > 0 ? provided : 0))
   );
-  const full = Math.max(0, roundMinutes(Number.isFinite(stored) && stored > 0 ? stored : fullMinutes));
   if (!SERVING_STATUSES.has(status)) {
     return full;
   }
@@ -390,7 +407,7 @@ function uniqueActiveProcedures(rows) {
   return unique;
 }
 
-async function resolveProcedureMinutes(db, procedure, settings) {
+function resolveProcedureMinutes(procedure, settings) {
   const recorded = Number(procedure?.duration_minutes);
   if (Number.isFinite(recorded) && recorded > 0) {
     const stats = emptyStats(normalizeProcedure(procedure.treatment), recorded);
@@ -398,15 +415,12 @@ async function resolveProcedureMinutes(db, procedure, settings) {
     stats.averageMinutes = roundMinutes(recorded);
     return { minutes: roundMinutes(recorded), stats, source: "recorded", reliable: true };
   }
-  const estimated = await estimateProcedureDuration(
-    db,
-    { service_name: procedure.treatment || procedure.service_name, service_id: procedure.service_id },
-    settings
-  );
-  if (estimated.source === "fallback") {
-    return { minutes: null, stats: estimated.stats, source: "fallback", reliable: false };
-  }
-  return { minutes: estimated.minutes, stats: estimated.stats, source: estimated.source, reliable: true };
+  return {
+    minutes: null,
+    stats: emptyStats(normalizeProcedure(procedure?.treatment), settings.fallbackMinutes),
+    source: "unrecorded",
+    reliable: false,
+  };
 }
 
 async function expectedMinutesForEntry(db, entry, settings, now) {
@@ -418,6 +432,7 @@ async function expectedMinutesForEntry(db, entry, settings, now) {
   );
   if (remainingRows.length) {
     let remaining = 0;
+    let fullMinutes = 0;
     const statsList = [];
     let unreliable = false;
     let overrun = false;
@@ -431,13 +446,14 @@ async function expectedMinutesForEntry(db, entry, settings, now) {
         if (alreadyInProgress) continue;
       }
       if (name) names.add(name);
-      const resolved = await resolveProcedureMinutes(db, procedure, settings);
+      const resolved = resolveProcedureMinutes(procedure, settings);
       statsList.push(resolved.stats);
       if (!resolved.reliable) {
         unreliable = true;
         continue;
       }
       const full = resolved.minutes;
+      fullMinutes += Math.max(0, roundMinutes(full));
       if (procedureStatus(procedure) === "in_progress") {
         const leftover = remainingServingMinutes(
           {
@@ -449,7 +465,11 @@ async function expectedMinutesForEntry(db, entry, settings, now) {
           now
         );
         remaining += leftover;
-        if (leftover === 0 && occupied) overrun = true;
+        if (leftover === 0 && occupied && servingStartTimestamp({
+          treatment_started_at: procedure.started_at || servingStartTimestamp(entry),
+        })) {
+          overrun = true;
+        }
       } else {
         remaining += Math.max(0, roundMinutes(full));
       }
@@ -457,6 +477,7 @@ async function expectedMinutesForEntry(db, entry, settings, now) {
     return {
       minutes: remaining,
       remainingMinutes: remaining,
+      fullMinutes: unreliable ? null : fullMinutes,
       stats: statsList[0] || emptyStats(bookedName || "unknown", settings.fallbackMinutes),
       source: "visit_procedures",
       procedureCount: remainingRows.length,
@@ -479,16 +500,34 @@ async function expectedMinutesForEntry(db, entry, settings, now) {
     };
   }
 
-  const estimated = await estimateProcedureDuration(db, entry, settings);
-  const reliable = estimated.source !== "fallback";
-  const remaining = reliable ? remainingServingMinutes(entry, estimated.minutes, now) : 0;
+  const recorded = recordedEntryDurationMinutes(entry);
+  if (!recorded) {
+    return {
+      minutes: null,
+      remainingMinutes: 0,
+      fullMinutes: null,
+      stats: emptyStats(bookedName || "unknown", settings.fallbackMinutes),
+      source: "unrecorded",
+      procedureCount: bookedName ? 1 : 0,
+      occupied,
+      overrun: false,
+      unreliable: occupied,
+    };
+  }
+  const remaining = remainingServingMinutes(entry, recorded, now);
+  const stats = emptyStats(bookedName || "unknown", recorded);
+  stats.usedFallback = false;
+  stats.averageMinutes = recorded;
   return {
-    ...estimated,
+    minutes: remaining,
     remainingMinutes: remaining,
+    fullMinutes: recorded,
+    stats,
+    source: "recorded",
     procedureCount: bookedName ? 1 : 0,
     occupied,
-    overrun: occupied && reliable && remaining === 0 && Boolean(servingStartTimestamp(entry)),
-    unreliable: !reliable,
+    overrun: occupied && remaining === 0 && Boolean(servingStartTimestamp(entry)),
+    unreliable: false,
   };
 }
 
@@ -517,15 +556,16 @@ function serializeEstimate({
   const min = serving || unavailable ? 0 : usePoint ? point : range.min;
   const max = serving || unavailable ? 0 : usePoint ? point : range.max;
   const hideWait = unavailable || treatmentOverrun || !(waiting || serving);
+  const servingNow = serving && !unavailable && !treatmentOverrun;
   return {
     queueNumber: entry.token || null,
     queuePosition: Number(entry.position) || null,
     patientsAhead: serving ? 0 : patientsAhead,
     estimatedDurationMinutes: durationMinutes,
-    estimatedWaitMinutes: hideWait || serving ? (serving && !unavailable ? { min: 0, max: 0 } : null) : { min, max },
+    estimatedWaitMinutes: hideWait || serving ? (servingNow ? { min: 0, max: 0 } : null) : { min, max },
     estimatedCallTime:
       hideWait || serving
-        ? serving && !unavailable
+        ? servingNow
           ? {
               start: now.toISOString(),
               end: now.toISOString(),
@@ -546,18 +586,11 @@ function serializeEstimate({
 function remainingTreatmentRange(row, durationMinutes, now = new Date()) {
   const status = String(row?.status || "").toLowerCase();
   if (!SERVING_STATUSES.has(status)) return null;
-  let remaining = Math.max(0, roundMinutes(durationMinutes));
-  const calculatedAt = row.wait_estimate_at || row.waitEstimateAt;
-  if (calculatedAt) {
-    const stamped = new Date(calculatedAt);
-    if (!Number.isNaN(stamped.getTime())) {
-      const elapsed = Math.max(0, (now.getTime() - stamped.getTime()) / 60000);
-      remaining = Math.max(0, roundMinutes(Number(durationMinutes) - elapsed));
-    }
-  } else {
-    remaining = remainingServingMinutes(row, durationMinutes, now);
+  const remaining = remainingServingMinutes(row, durationMinutes, now);
+  if (remaining <= 0) {
+    if (servingStartTimestamp(row)) return { min: 0, max: 0, overrun: true };
+    return durationMinutes > 0 ? { min: Math.max(0, roundMinutes(durationMinutes)), max: Math.max(0, roundMinutes(durationMinutes)) } : null;
   }
-  if (remaining <= 0) return { min: 0, max: 0, overrun: true };
   return { min: remaining, max: remaining };
 }
 
@@ -647,6 +680,7 @@ async function loadTodayQueue(db, branchId = null) {
          queue.checked_in_at,
          queue.appointment_id,
          queue.serving_started_at,
+         queue.branch_id,
          appointment.service_id,
          appointment.service_name,
          appointment.dentist_id,
@@ -695,7 +729,9 @@ async function loadTodayQueue(db, branchId = null) {
 }
 
 function dentistLane(entry) {
-  return String(entry?.dentist_id || entry?.dentistId || "").trim() || "__unassigned__";
+  const dentist = String(entry?.dentist_id || entry?.dentistId || "").trim() || "__unassigned__";
+  const branch = String(entry?.branch_id ?? entry?.branchId ?? "").trim();
+  return branch ? `${branch}::${dentist}` : dentist;
 }
 
 function queueOrderKey(row) {
@@ -750,20 +786,25 @@ async function estimateWaitForQueueContext(db, { entry, aheadEntries = [], now =
   }
 
   const selfDuration = await expectedMinutesForEntry(db, entry, service.settings, now);
+  const selfDurationMinutes =
+    selfDuration.unreliable ? null : selfDuration.fullMinutes ?? selfDuration.minutes;
   if (SERVING_STATUSES.has(status)) {
     return serializeEstimate({
       entry,
       waitPoint: 0,
       range: { min: 0, max: 0 },
-      durationMinutes: selfDuration.minutes,
+      durationMinutes: selfDurationMinutes,
       now,
       settings: service.settings,
       predictor: service.predictor,
       stats: selfDuration.stats,
       patientsAhead: 0,
+      unavailable: Boolean(selfDuration.unreliable),
+      treatmentOverrun: Boolean(selfDuration.overrun) && !selfDuration.unreliable,
     });
   }
 
+  const slotMinutes = Math.max(1, Number(service.settings.waitingAllowanceMinutes) || QUEUE_WAIT_SLOT_MINUTES);
   let waitPoint = 0;
   const aheadStats = [];
   let unreliableAhead = false;
@@ -772,12 +813,16 @@ async function estimateWaitForQueueContext(db, { entry, aheadEntries = [], now =
   for (const ahead of aheadEntries) {
     const aheadStatus = String(ahead.status || "").toLowerCase();
     if (!ACTIVE_STATUSES.has(aheadStatus)) continue;
-    const estimated = await expectedMinutesForEntry(db, ahead, service.settings, now);
-    waitPoint += Math.max(0, Number(estimated.remainingMinutes) || 0);
-    if (estimated.stats) aheadStats.push(estimated.stats);
-    if (estimated.unreliable || estimated.source === "fallback") unreliableAhead = true;
-    if (estimated.occupied) occupiedAhead = true;
-    if (estimated.overrun && !(Number(estimated.remainingMinutes) > 0)) overrunOnly = true;
+    if (SERVING_STATUSES.has(aheadStatus)) {
+      const estimated = await expectedMinutesForEntry(db, ahead, service.settings, now);
+      waitPoint += Math.max(0, Number(estimated.remainingMinutes) || 0);
+      if (estimated.stats) aheadStats.push(estimated.stats);
+      if (estimated.unreliable || estimated.source === "unrecorded") unreliableAhead = true;
+      occupiedAhead = true;
+      if (estimated.overrun && !(Number(estimated.remainingMinutes) > 0)) overrunOnly = true;
+      continue;
+    }
+    waitPoint += slotMinutes;
   }
 
   const combined = aheadStats.length
@@ -804,7 +849,7 @@ async function estimateWaitForQueueContext(db, { entry, aheadEntries = [], now =
     entry,
     waitPoint,
     range,
-    durationMinutes: selfDuration.minutes,
+    durationMinutes: selfDurationMinutes,
     now,
     settings: service.settings,
     predictor: service.predictor,
@@ -1060,6 +1105,7 @@ const QUEUE_ESTIMATE_SELECT = `
 module.exports = {
   ACTIVE_STATUSES,
   QUEUE_ESTIMATE_SELECT,
+  QUEUE_WAIT_SLOT_MINUTES,
   SERVING_STATUSES,
   WAITING_STATUSES,
   createPredictionService,
